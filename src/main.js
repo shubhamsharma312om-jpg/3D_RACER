@@ -52,9 +52,9 @@ async function initApp() {
   const earlyWelcomeProgressFill = document.getElementById('welcome-btn-progress-fill');
   if (!isScreenshotMode && earlyBtnWelcomeStart) {
     earlyBtnWelcomeStart.classList.add('is-warming-up');
-    if (earlyWelcomeProgressFill) earlyWelcomeProgressFill.style.width = '8%';
-    if (earlyWelcomeStartText) earlyWelcomeStartText.textContent = 'PREPARING CIRCUIT...';
-    if (earlyWelcomeEnterKbd) earlyWelcomeEnterKbd.textContent = '8%';
+    if (earlyWelcomeProgressFill) earlyWelcomeProgressFill.style.width = '15%';
+    if (earlyWelcomeStartText) earlyWelcomeStartText.textContent = 'START TIME TRIAL';
+    if (earlyWelcomeEnterKbd) earlyWelcomeEnterKbd.textContent = 'ENTER ↵';
     try {
       window.focus();
       earlyBtnWelcomeStart.focus({ preventScroll: true });
@@ -69,7 +69,35 @@ async function initApp() {
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 0.68 + 0.08 * 1.15;
+  renderer.domElement.tabIndex = 0;
+  renderer.domElement.style.outline = 'none';
   container.appendChild(renderer.domElement);
+
+  function focusGameCanvas() {
+    if (isScreenshotMode) return;
+    try {
+      window.focus();
+      renderer.domElement.focus({ preventScroll: true });
+    } catch (_e) {
+      // Ignore cross-origin focus restrictions
+    }
+  }
+
+  window.addEventListener(
+    'pointerdown',
+    (e) => {
+      try {
+        window.focus();
+      } catch (_err) {
+        // Ignore
+      }
+      const tag = e.target && e.target.tagName ? e.target.tagName.toUpperCase() : '';
+      if (!['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'A'].includes(tag)) {
+        focusGameCanvas();
+      }
+    },
+    { passive: true }
+  );
 
   // Subtle 1-time PMREM studio environment so dark metallic/satin surfaces (monitor, BoYata, G915) have crisp reflections
   const pmremGenerator = new THREE.PMREMGenerator(renderer);
@@ -2008,7 +2036,7 @@ async function initApp() {
   const f1CountdownState = {
     active: false,
     elapsed: 0.0,
-    stepDuration: 0.85, // 0.85s per light (5 lights right-to-left = 4.25s total before Lights Out!)
+    stepDuration: 0.45, // Snappy 0.45s per light (or unlocks immediately as soon as player presses W/Up!)
     lastStepIndex: -1,
   };
 
@@ -2133,7 +2161,7 @@ async function initApp() {
       glbDownloadProgress.room * 0.28 +
       glbDownloadProgress.kart * 0.06 +
       audioPreloadProgress * 0.08;
-    const pct = Math.max(8, Math.min(99, Math.round(weightedFraction * 100)));
+    const pct = Math.max(15, Math.min(99, Math.round(weightedFraction * 100)));
 
     btnWelcomeStart.classList.add('is-warming-up');
     btnWelcomeStart.classList.toggle('is-queued', pendingRaceStartAfterWarmup);
@@ -2141,12 +2169,10 @@ async function initApp() {
       elWelcomeProgressFill.style.width = `${pct}%`;
     }
     if (elWelcomeStartText) {
-      elWelcomeStartText.textContent = pendingRaceStartAfterWarmup
-        ? 'STARTING TIME TRIAL...'
-        : 'PREPARING CIRCUIT...';
+      elWelcomeStartText.textContent = 'START TIME TRIAL';
     }
     if (elWelcomeEnterKbd) {
-      elWelcomeEnterKbd.textContent = `${pct}%`;
+      elWelcomeEnterKbd.textContent = 'ENTER ↵';
     }
   }
 
@@ -2333,6 +2359,23 @@ async function initApp() {
       elWelcomeOverlay.classList.add('hidden');
     }
     syncMobileTouchControlsVisibility();
+    focusGameCanvas();
+  }
+
+  if (physics.onManualDriveInput) {
+    physics.onManualDriveInput(() => {
+      if (elWelcomeOverlay && !elWelcomeOverlay.classList.contains('hidden')) {
+        if (audioSynth.setEnabled && !audioSynth.isEnabled?.()) {
+          const on = audioSynth.setEnabled(true);
+          updateAudioButtonUI(on);
+        }
+        hideWelcomeDialog();
+      }
+      if (f1CountdownState.active) {
+        cancelF1StartCountdown();
+        physics.state.raceClockActive = true;
+      }
+    });
   }
 
   if (elBrandLogo) {
@@ -2364,20 +2407,19 @@ async function initApp() {
     hideFinishOverlay();
     hideLapSplit();
     startF1StartCountdown();
+    focusGameCanvas();
   }
 
   if (btnWelcomeStart) {
     btnWelcomeStart.addEventListener('click', (e) => {
       e.stopPropagation();
       dismissWelcomeAndStartRace();
-      btnWelcomeStart.blur();
     });
     btnWelcomeStart.addEventListener('keydown', (e) => {
       if (e.code === 'Enter' || e.code === 'NumpadEnter' || e.key === 'Enter' || e.code === 'Space') {
         e.preventDefault();
         e.stopPropagation();
         dismissWelcomeAndStartRace();
-        btnWelcomeStart.blur();
       }
     });
   }
@@ -2386,7 +2428,6 @@ async function initApp() {
     btnFinishRaceAgain.addEventListener('click', (e) => {
       e.stopPropagation();
       dismissWelcomeAndStartRace();
-      btnFinishRaceAgain.blur();
     });
   }
 
@@ -2398,7 +2439,7 @@ async function initApp() {
       hideLapSplit();
       cancelF1StartCountdown();
       physics.setAutopilot(true);
-      btnFinishAutopilot.blur();
+      focusGameCanvas();
     });
   }
 
@@ -2411,24 +2452,46 @@ async function initApp() {
   window.addEventListener('keydown', (e) => {
     if (e.target && ['INPUT', 'TEXTAREA'].includes(e.target.tagName) && !e.target.readOnly) return;
     if (e.repeat) return;
+    const isWelcomeOpen = elWelcomeOverlay && !elWelcomeOverlay.classList.contains('hidden');
+    const isFinishOpen = elFinishOverlay && !elFinishOverlay.classList.contains('hidden');
+    const keyLower = (e.key || '').toLowerCase();
+
     if (e.code === 'Enter' || e.code === 'NumpadEnter' || e.key === 'Enter') {
-      e.preventDefault();
-      dismissWelcomeAndStartRace();
+      if (isWelcomeOpen || isFinishOpen) {
+        e.preventDefault();
+        dismissWelcomeAndStartRace();
+      }
     } else if (
       e.code === 'KeyW' ||
-      e.code === 'ArrowUp' ||
+      e.code === 'KeyS' ||
       e.code === 'KeyA' ||
       e.code === 'KeyD' ||
+      e.code === 'ArrowUp' ||
+      e.code === 'ArrowDown' ||
       e.code === 'ArrowLeft' ||
-      e.code === 'ArrowRight'
+      e.code === 'ArrowRight' ||
+      keyLower === 'w' ||
+      keyLower === 's' ||
+      keyLower === 'a' ||
+      keyLower === 'd'
     ) {
-      hideWelcomeDialog();
-    } else if (e.code === 'KeyR') {
+      if (isWelcomeOpen) {
+        if (audioSynth.setEnabled && !audioSynth.isEnabled?.()) {
+          const on = audioSynth.setEnabled(true);
+          updateAudioButtonUI(on);
+        }
+        hideWelcomeDialog();
+      }
+      if (f1CountdownState.active) {
+        cancelF1StartCountdown();
+        physics.state.raceClockActive = true;
+      }
+    } else if (e.code === 'KeyR' || keyLower === 'r') {
       hideWelcomeDialog();
       hideFinishOverlay();
       hideLapSplit();
       cancelF1StartCountdown();
-    } else if (e.code === 'KeyP') {
+    } else if (e.code === 'KeyP' || keyLower === 'p') {
       hideWelcomeDialog();
       hideFinishOverlay();
       hideLapSplit();
@@ -2686,10 +2749,15 @@ async function initApp() {
     return bestZ < Infinity ? bestZ : computeExactViewDepth(kartWorldPt);
   }
 
+  let lastFrameTimeMs = performance.now();
+
   function animate() {
-    const dt = isScreenshotMode ? 1 / 60 : clock.getDelta();
+    const nowMs = performance.now();
+    const rawDt = Math.min(0.05, Math.max(0.001, (nowMs - lastFrameTimeMs) * 0.001));
+    lastFrameTimeMs = nowMs;
+    const dt = isScreenshotMode ? 1 / 60 : rawDt;
     const elapsedTime =
-      (isScreenshotMode ? screenshotFrameCounter / 60 : clock.getElapsedTime()) +
+      (isScreenshotMode ? screenshotFrameCounter / 60 : (nowMs - appInitTimestamp) * 0.001) +
       requestedTimeOffset;
 
     // 0. Step Formula 1 5-Light Start Countdown if active

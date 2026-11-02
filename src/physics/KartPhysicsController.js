@@ -7,58 +7,57 @@ import RAPIER from '@dimforge/rapier3d-compat';
  * Spline-Assisted Banked Coaster Surface & Raycast Vehicle Controller.
  */
 export async function createKartPhysicsController(splineData, manifest, roadGeo) {
-  await RAPIER.init();
+  let world = null;
+  // Initialize Rapier3D asynchronously in the background so WASM/trimesh setup never blocks or crashes startup
+  Promise.resolve()
+    .then(async () => {
+      await RAPIER.init();
+      const gravity = { x: 0.0, y: -9.81, z: 0.0 };
+      world = new RAPIER.World(gravity);
 
-  const gravity = { x: 0.0, y: -9.81, z: 0.0 };
-  const world = new RAPIER.World(gravity);
+      // 1. Static Oak Desk Collider (1100 x 25 x 600 mm, top at Y=0)
+      const deskBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(0.0, -0.0125, 0.0);
+      const deskBody = world.createRigidBody(deskBodyDesc);
+      world.createCollider(RAPIER.ColliderDesc.cuboid(0.55, 0.0125, 0.3), deskBody);
 
-  // 1. Static Oak Desk Collider (1100 x 25 x 600 mm, top at Y=0)
-  const deskBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(0.0, -0.0125, 0.0);
-  const deskBody = world.createRigidBody(deskBodyDesc);
-  world.createCollider(RAPIER.ColliderDesc.cuboid(0.55, 0.0125, 0.3), deskBody);
+      // 2. Static Colliders for the Desk Monuments
+      if (manifest && Array.isArray(manifest.desk_objects)) {
+        for (const obj of manifest.desk_objects) {
+          if (obj.id === 'oak_desk_tabletop') continue;
+          const c = obj.center_xyz || obj.base_xyz || obj.mat_center_xyz || [0, 0, 0];
+          const d =
+            obj.dimensions_wdh ||
+            obj.panel_dimensions_wdh ||
+            obj.head_dimensions_wdh ||
+            obj.mat_dimensions_wdh || [0.06, 0.06, 0.06];
+          const bDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(
+            c[0],
+            c[1] + d[2] * 0.5,
+            c[2]
+          );
+          const body = world.createRigidBody(bDesc);
+          world.createCollider(
+            RAPIER.ColliderDesc.cuboid(d[0] * 0.5, d[2] * 0.5, d[1] * 0.5),
+            body
+          );
+        }
+      }
 
-  // 2. Static Colliders for the Desk Monuments
-  if (manifest && Array.isArray(manifest.desk_objects)) {
-    for (const obj of manifest.desk_objects) {
-      if (obj.id === 'oak_desk_tabletop') continue;
-      const c = obj.center_xyz || obj.base_xyz || obj.mat_center_xyz || [0, 0, 0];
-      const d =
-        obj.dimensions_wdh ||
-        obj.panel_dimensions_wdh ||
-        obj.head_dimensions_wdh ||
-        obj.mat_dimensions_wdh || [0.06, 0.06, 0.06];
-      const bDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(
-        c[0],
-        c[1] + d[2] * 0.5,
-        c[2]
+      // 3. Kinematic Position-Based RigidBody for the 1:87 Micro-Kart (18mm x 12mm x 8mm)
+      const kartBodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(
+        0.0,
+        0.036,
+        0.255
       );
-      const body = world.createRigidBody(bDesc);
+      const kartBody = world.createRigidBody(kartBodyDesc);
       world.createCollider(
-        RAPIER.ColliderDesc.cuboid(d[0] * 0.5, d[2] * 0.5, d[1] * 0.5),
-        body
+        RAPIER.ColliderDesc.cuboid(0.006, 0.004, 0.009).setRestitution(0.4),
+        kartBody
       );
-    }
-  }
-
-  // 3. Coaster Roadbed Trimesh Collider inside Rapier World
-  if (roadGeo && roadGeo.attributes.position && roadGeo.index) {
-    const verts = new Float32Array(roadGeo.attributes.position.array);
-    const indices = new Uint32Array(roadGeo.index.array);
-    const trackBody = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
-    world.createCollider(RAPIER.ColliderDesc.trimesh(verts, indices), trackBody);
-  }
-
-  // 4. Kinematic Position-Based RigidBody for the 1:87 Micro-Kart (18mm x 12mm x 8mm)
-  const kartBodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(
-    0.0,
-    0.036,
-    0.255
-  );
-  const kartBody = world.createRigidBody(kartBodyDesc);
-  world.createCollider(
-    RAPIER.ColliderDesc.cuboid(0.006, 0.004, 0.009).setRestitution(0.4),
-    kartBody
-  );
+    })
+    .catch((err) => {
+      console.warn('Rapier background init skipped:', err);
+    });
 
   // -------------------------------------------------------------------------
   // PRECOMPUTE PERIODIC SPLINE TABLE & SECTOR START ARC-LENGTHS
@@ -331,6 +330,7 @@ export async function createKartPhysicsController(splineData, manifest, roadGeo)
   let onModeChangeCallback = null;
   let onRaceFinishCallback = null;
   let onRailImpactCallback = null;
+  let onManualDriveInputCallback = null;
 
   function computeActiveKeysStr() {
     return (
@@ -487,12 +487,29 @@ export async function createKartPhysicsController(splineData, manifest, roadGeo)
     state.activeKeysStr = computeActiveKeysStr();
   }
 
+  function unlockForManualDrive(isForwardInput = false) {
+    if (state.autopilot) {
+      setAutopilot(false);
+    }
+    if (state.countdownLocked) {
+      state.countdownLocked = false;
+      state.wasCountdownLocked = false;
+      state.raceClockActive = true;
+      if (isForwardInput) {
+        state.boostActive = Math.max(state.boostActive, 0.45);
+      }
+    }
+    if (onManualDriveInputCallback) {
+      onManualDriveInputCallback();
+    }
+  }
+
   function setTouchKey(dir, isDown) {
     if (!(dir in touchKeys)) return;
     const nextDown = Boolean(isDown);
     touchKeys[dir] = nextDown;
-    if (nextDown && state.autopilot) {
-      setAutopilot(false);
+    if (nextDown) {
+      unlockForManualDrive(dir === 'forward');
     }
     syncCombinedKeys();
   }
@@ -505,40 +522,60 @@ export async function createKartPhysicsController(splineData, manifest, roadGeo)
     syncCombinedKeys();
   }
 
-  // Pure Grip Racing (W/A/S/D or Arrow Keys only, plus P for Autopilot and R for Reset)
+  function resolveKeyAction(e) {
+    const code = e.code || '';
+    const key = (e.key || '').toLowerCase();
+    if (code === 'KeyW' || code === 'ArrowUp' || key === 'w' || key === 'arrowup' || key === 'up') {
+      return 'forward';
+    }
+    if (code === 'KeyS' || code === 'ArrowDown' || key === 's' || key === 'arrowdown' || key === 'down') {
+      return 'backward';
+    }
+    if (code === 'KeyA' || code === 'ArrowLeft' || key === 'a' || key === 'arrowleft' || key === 'left') {
+      return 'left';
+    }
+    if (code === 'KeyD' || code === 'ArrowRight' || key === 'd' || key === 'arrowright' || key === 'right') {
+      return 'right';
+    }
+    if (code === 'KeyP' || key === 'p') {
+      return 'autopilot';
+    }
+    if (code === 'KeyR' || key === 'r') {
+      return 'reset';
+    }
+    return null;
+  }
+
+  // Pure Grip Racing (W/A/S/D or Arrow Keys, plus P for Autopilot and R for Reset)
   if (typeof window !== 'undefined' && window.addEventListener) {
-    window.addEventListener('keydown', (e) => {
+    const handleKeyDown = (e) => {
       if (e.target && ['INPUT', 'TEXTAREA'].includes(e.target.tagName) && !e.target.readOnly) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const code = e.code;
-      if (code === 'KeyW' || code === 'ArrowUp') {
-        kbKeys.forward = true;
-        if (state.autopilot) setAutopilot(false);
-      } else if (code === 'KeyS' || code === 'ArrowDown') {
-        kbKeys.backward = true;
-        if (state.autopilot) setAutopilot(false);
-      } else if (code === 'KeyA' || code === 'ArrowLeft') {
-        kbKeys.left = true;
-        if (state.autopilot) setAutopilot(false);
-      } else if (code === 'KeyD' || code === 'ArrowRight') {
-        kbKeys.right = true;
-        if (state.autopilot) setAutopilot(false);
-      } else if (code === 'KeyP') {
+      const action = resolveKeyAction(e);
+      if (!action) return;
+
+      if (action === 'forward' || action === 'backward' || action === 'left' || action === 'right') {
+        if (e.cancelable) e.preventDefault();
+        kbKeys[action] = true;
+        unlockForManualDrive(action === 'forward');
+      } else if (action === 'autopilot' && !e.repeat) {
         setAutopilot(!state.autopilot);
-      } else if (code === 'KeyR') {
+      } else if (action === 'reset' && !e.repeat) {
         resetToStart();
       }
       syncCombinedKeys();
-    });
+    };
 
-    window.addEventListener('keyup', (e) => {
-      const code = e.code;
-      if (code === 'KeyW' || code === 'ArrowUp') kbKeys.forward = false;
-      else if (code === 'KeyS' || code === 'ArrowDown') kbKeys.backward = false;
-      else if (code === 'KeyA' || code === 'ArrowLeft') kbKeys.left = false;
-      else if (code === 'KeyD' || code === 'ArrowRight') kbKeys.right = false;
-      syncCombinedKeys();
-    });
+    const handleKeyUp = (e) => {
+      const action = resolveKeyAction(e);
+      if (action === 'forward' || action === 'backward' || action === 'left' || action === 'right') {
+        kbKeys[action] = false;
+        syncCombinedKeys();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    window.addEventListener('keyup', handleKeyUp, { capture: true });
 
     window.addEventListener('blur', () => {
       kbKeys.forward = false;
@@ -1132,6 +1169,9 @@ export async function createKartPhysicsController(splineData, manifest, roadGeo)
     },
     onRailImpact: (cb) => {
       onRailImpactCallback = cb;
+    },
+    onManualDriveInput: (cb) => {
+      onManualDriveInputCallback = cb;
     },
   };
 }
